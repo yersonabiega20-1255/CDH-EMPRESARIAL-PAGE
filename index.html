@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+<!DOCTYPE html> 
 <html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Escáner CDH</title>
 <style>
@@ -17,12 +17,14 @@ button.sec{padding:9px 12px;font-size:13px;border:1px solid #CBD5E1;border-radiu
 .mov{font-size:12px;padding:4px 0;border-bottom:1px solid #E2E8F0}.fila{display:flex;gap:6px}.fila>div{flex:1}
 .chk{display:flex;gap:8px;align-items:center;font-size:12px;margin:8px 0}.chk input{width:auto;margin:0}
 #pin{font-size:26px;letter-spacing:10px;text-align:center}
+  #toast { position:fixed; left:50%; bottom:22px; transform:translateX(-50%); max-width:92%; padding:10px 16px; border-radius:24px; font-size:14px; font-weight:bold; box-shadow:0 4px 14px rgba(0,0,0,.25); opacity:0; pointer-events:none; transition:opacity .2s; z-index:50; text-align:center; }
+  #toast.show { opacity:1; } .t-ok { background:#16A34A; color:#fff; } .t-err { background:#DC2626; color:#fff; } .t-info { background:#1F3864; color:#fff; }
 </style></head><body>
 <h1>🔎 Escáner CDH</h1>
 <div id="gate"><label>🔒 PIN (4 números)</label><input id="pin" type="password" inputmode="numeric" maxlength="4"><button class="main" style="background:var(--az)" onclick="entrar()">Entrar</button><div id="gmsg"></div></div>
 <div id="app" style="display:none">
  <div class="modos" id="modos"></div>
- <button class="sec" id="bCam" onclick="camara()">📷 Abrir cámara</button>
+ <button class="sec" id="bCam" onclick="camara()">📷 Abrir cámara</button> <button class="sec" onclick="recargarListas(true)">🔄 Listas</button>
  <div id="reader"></div>
  <label>🔑 Código (se llena solo al escanear; también puedes escribirlo)</label>
  <div class="fila"><input id="cod" autocapitalize="characters" placeholder="E1-31 · o parte del nombre"><button class="sec" onclick="buscar($('cod').value)">🔍</button></div>
@@ -39,6 +41,7 @@ button.sec{padding:9px 12px;font-size:13px;border:1px solid #CBD5E1;border-radiu
  </div>
  <div class="msg" id="msg">Abre la cámara y apunta al código.</div>
 </div>
+<div id="toast"></div>
 <script src="https://cdn.jsdelivr.net/npm/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <script>
 /* ▼▼ PEGA AQUÍ la URL de tu aplicación web de Apps Script (la que termina en /exec) ▼▼ */
@@ -46,19 +49,33 @@ var API_URL = 'https://script.google.com/macros/s/AKfycbyduW6ABE-9GZh4eKl4NBmJBb
 var MODOS = {ING:['📥 INGRESO','#2E8B6A'],SAL:['📤 SALIDA','#C0504D'],DEV:['↩ DEVOLUC.','#7030A0'],CON:['🔍 KARDEX','#0E7490']};
 var modo=localStorage.getItem('cdh_modo')||'ING', pin='', item=null, qr=null, ultimo='', ultimoT=0;
 function $(i){return document.getElementById(i)}
+function ubic(it){return it.estante+(it.nivel?' · Nivel '+it.nivel:'')}
 function esc(s){return String(s==null?'':s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;')}
-function msg(t,c){var m=$('msg');m.className='msg '+(c||'');m.textContent=t}
+var AC = null, ultReg = { id: '', t: 0 };
+function audio() { try { if (!AC) AC = new (window.AudioContext || window.webkitAudioContext)(); if (AC.state === 'suspended') AC.resume(); } catch (x) {} }
+function tono(f, t0, d, v, tipo) { if (!AC) return; var o = AC.createOscillator(), g = AC.createGain(), t = AC.currentTime + t0; o.type = tipo || 'sine'; o.frequency.value = f; g.gain.setValueAtTime(0.0001, t); g.gain.exponentialRampToValueAtTime(v, t + 0.01); g.gain.exponentialRampToValueAtTime(0.0001, t + d); o.connect(g); g.connect(AC.destination); o.start(t); o.stop(t + d + 0.03); }
+/* Sonidos: scan = bip corto · ok = dos notas que suben (registrado) · err = dos notas graves y suaves que bajan (no encontrado / error) · dup = "tuc" suave (repetido ignorado) */
+function snd(k) {
+  audio(); if (!AC) return;
+  if (k === 'scan') tono(1400, 0, 0.09, 0.25, 'triangle');
+  else if (k === 'ok') { tono(660, 0, 0.12, 0.28); tono(990, 0.12, 0.2, 0.28); }
+  else if (k === 'err') { tono(330, 0, 0.18, 0.22); tono(247, 0.18, 0.28, 0.22); }
+  else if (k === 'dup') tono(520, 0, 0.1, 0.18);
+}
+['pointerdown', 'keydown', 'touchstart'].forEach(function (ev) { document.addEventListener(ev, audio, { passive: true }); });
+function toast(t, c) { var e = $('toast'); e.textContent = t; e.className = 'show t-' + (c || 'info'); clearTimeout(toast.h); toast.h = setTimeout(function () { e.className = ''; }, 3200); }
+function msg(t,c){var m=$('msg');m.className='msg '+(c||'');m.textContent=t;if(c==='ok'||c==='err'){toast(t,c);if(c==='err')snd('err')}}
 function api(fn,args){
   return fetch(API_URL,{method:'POST',body:JSON.stringify({fn:fn,args:args})}).then(function(r){return r.json()}).then(function(r){if(!r.ok)throw new Error(r.error);return r.data});
 }
-function fill(id,a){$(id).innerHTML='<option value="">— elige —</option>'+a.map(function(x){return '<option>'+esc(x)+'</option>'}).join('')}
+function fill(id,a){var pv=$(id).value;$(id).innerHTML='<option value="">— elige —</option>'+a.map(function(x){return '<option>'+esc(x)+'</option>'}).join('');if(pv&&a.indexOf(pv)>-1)$(id).value=pv}
 function entrar(){
   pin=$('pin').value.trim(); if(!/^\d{4}$/.test(pin)){$('gmsg').innerHTML='<div class="msg err">Escribe los 4 números.</div>';return}
   if(API_URL.indexOf('PEGA_')===0){$('gmsg').innerHTML='<div class="msg err">Falta pegar la URL /exec en el archivo (variable API_URL).</div>';return}
   api('panelInit',[pin]).then(function(r){
     $('gate').style.display='none';$('app').style.display='block';
     fill('tipoIng',r.tiposIng);fill('tipoSol',r.tiposSol);fill('motivo',r.motivos);fill('area',r.areas);
-    $('resp').value=localStorage.getItem('cdh_resp')||r.responsable||'';
+    $('resp').value=r.responsable||localStorage.getItem('cdh_resp')||'';   /* manda el ÚLTIMO nombre guardado en el servidor */
     var b='';Object.keys(MODOS).forEach(function(k){b+='<button id="m'+k+'" onclick="setModo(\''+k+'\')">'+MODOS[k][0]+'</button>'});$('modos').innerHTML=b;
     setModo(modo);
   }).catch(function(e){$('gmsg').innerHTML='<div class="msg err">❌ '+esc(e.message)+'</div>';$('pin').value=''});
@@ -79,8 +96,9 @@ function camara(){
   qr=new Html5Qrcode('reader',{formatsToSupport:[F.CODE_39,F.CODE_128,F.QR_CODE,F.EAN_13],experimentalFeatures:{useBarCodeDetectorIfSupported:true}});
   qr.start({facingMode:'environment'},{fps:10,qrbox:{width:260,height:140}},function(t){
     t=String(t).replace(/^\*+|\*+$/g,'').toUpperCase();var n=Date.now();
-    if(t===ultimo&&n-ultimoT<3000)return;ultimo=t;ultimoT=n;      // evita leer el mismo código dos veces seguidas
-    if(navigator.vibrate)navigator.vibrate(120);$('cod').value=t;buscar(t);
+    var mismo=(t===ultimo&&n-ultimoT<1500);ultimo=t;ultimoT=n;   // mientras el código siga frente a la cámara NO se repite; hay que alejarlo ~1,5 s para leerlo otra vez
+    if(mismo)return;
+    snd('scan');if(navigator.vibrate)navigator.vibrate(120);$('cod').value=t;buscar(t);
   },function(){}).catch(function(e){msg('No se pudo abrir la cámara: '+e+'. Permite la cámara para este sitio en Chrome (candado de la barra de direcciones).','err');parar()});
 }
 function parar(){if(qr){qr.stop().catch(function(){});qr=null}$('reader').style.display='none';$('bCam').textContent='📷 Abrir cámara'}
@@ -89,14 +107,14 @@ function buscar(v){
   api('resolver',[v,pin]).then(function(r){
     $('lista').innerHTML='';
     if(r.tipo==='exacto')elegir(r.item);
-    else if(r.tipo==='lista'){r.items.forEach(function(it){var d=document.createElement('div');d.className='card';d.style.display='block';d.innerHTML='<b>'+esc(it.id)+'</b> · '+esc(it.desc)+'<br><small>'+esc(it.estante)+' · stock '+esc(it.stock)+'</small>';d.onclick=function(){$('lista').innerHTML='';elegir(it)};$('lista').appendChild(d)});msg('Toca el ítem correcto.')}
+    else if(r.tipo==='lista'){r.items.forEach(function(it){var d=document.createElement('div');d.className='card';d.style.display='block';d.innerHTML='<b>'+esc(it.id)+'</b> · '+esc(it.desc)+'<br><small>'+esc(ubic(it))+' · stock '+esc(it.stock)+'</small>';d.onclick=function(){$('lista').innerHTML='';elegir(it)};$('lista').appendChild(d)});msg('Toca el ítem correcto.')}
     else{item=null;$('card').style.display='none';msg('❌ No encontré "'+v+'".','err')}
   }).catch(function(e){msg('❌ '+e.message,'err')});
 }
 function elegir(it){
   item=it;$('card').style.display='block';$('movs').innerHTML='';
   $('cid').textContent=it.id+' · '+it.tipo;$('cdesc').textContent=it.desc;
-  $('cdato').textContent='📍 '+it.estante+'  |  Stock: '+it.stock+'  |  '+it.alerta+(it.tipo==='REUTILIZABLE'?'  |  Fuera sin devolver: '+it.fuera:'');
+  $('cdato').textContent='📍 '+ubic(it)+'  |  Stock: '+it.stock+'  |  '+it.alerta+(it.tipo==='REUTILIZABLE'?'  |  Fuera sin devolver: '+it.fuera:'');
   if(modo==='CON')return consultar(it.id);
   msg('Ítem listo. Indica la cantidad y registra.','ok');
   if($('auto').checked)registrar(); else{$('cant').focus();$('cant').select()}
@@ -108,7 +126,9 @@ function consultar(id){
   }).catch(function(e){msg('❌ '+e.message,'err')});
 }
 function registrar(){
+  if($('bReg').disabled)return;                      // ya hay un registro en camino
   if(!item){msg('Primero escanea un ítem.','err');return}
+  if($('auto').checked&&ultReg.id===item.id&&Date.now()-ultReg.t<4000){snd('dup');toast('⚠ '+item.id+' ya se registró hace un momento: no se repite.','err');item=null;$('card').style.display='none';return}
   var c=parseFloat(String($('cant').value).replace(',','.'));if(!(c>0)){msg('Cantidad mayor que 0.','err');return}
   var resp=$('resp').value.trim();if(!resp){msg('Escribe el responsable.','err');return}
   if(modo==='ING'&&!$('tipoIng').value){msg('Elige el tipo de ingreso.','err');return}
@@ -116,10 +136,16 @@ function registrar(){
   localStorage.setItem('cdh_resp',resp);$('bReg').disabled=true;
   var p={modo:modo,id:item.id,cant:c,resp:resp,tipoIng:$('tipoIng').value,ptot:$('ptot').value,factura:$('factura').value.trim(),tipoSol:$('tipoSol').value,motivo:$('motivo').value,area:$('area').value,detalle:$('detalle').value.trim()};
   api('registrarMovimiento',[p,pin]).then(function(r){
-    $('bReg').disabled=false;msg('✅ '+r.msg+'  Stock actual: '+r.stock+' '+r.alerta,'ok');
+    $('bReg').disabled=false;msg('✅ '+r.msg+'  Stock actual: '+r.stock+' '+r.alerta,'ok');snd('ok');ultReg={id:p.id,t:Date.now()};
     item=null;$('card').style.display='none';$('cod').value='';$('cant').value=1;$('detalle').value='';$('ptot').value='';$('factura').value='';
   }).catch(function(e){$('bReg').disabled=false;msg('❌ '+e.message,'err')});
 }
+$('resp').addEventListener('change',function(){var n=this.value.trim();if(!n)return;localStorage.setItem('cdh_resp',n);api('guardarResp',[n,pin]).catch(function(){})});
+function recargarListas(manual){
+  if($('app').style.display==='none')return;
+  api('panelInit',[pin]).then(function(r){fill('tipoIng',r.tiposIng);fill('tipoSol',r.tiposSol);fill('motivo',r.motivos);fill('area',r.areas);if(manual)msg('🔄 Listas actualizadas.','ok')}).catch(function(e){if(manual)msg('❌ '+e.message,'err')});
+}
+document.addEventListener('visibilitychange',function(){if(!document.hidden)recargarListas(false)});
 $('cod').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();buscar($('cod').value)}});
 $('pin').addEventListener('keydown',function(e){if(e.key==='Enter'){e.preventDefault();entrar()}});
 </script></body></html>
